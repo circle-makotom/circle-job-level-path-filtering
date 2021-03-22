@@ -1,0 +1,101 @@
+version: 2.1
+
+jobs:
+  job-common-1:
+    docker:
+      - image: debian:buster-slim
+    steps:
+      - checkout
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  job-common-2:
+    docker:
+      - image: debian:buster-slim
+    steps:
+      - attach_workspace:
+          at: .
+      - run: echo 'do something'
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+
+  build-module:
+    parameters:
+      module:
+        description: Name of the module to build
+        type: string
+    docker:
+      - image: debian:buster-slim
+    steps:
+      - attach_workspace:
+          at: .
+      - run: ls -lR
+      - run: echo << parameters.module >>
+      - run: touch module-<< parameters.module >>/null
+      - persist_to_workspace:
+          root: .
+          paths:
+            - module-<< parameters.module >>
+
+  post-yz:
+    docker:
+      - image: debian:buster-slim
+    steps:
+      - attach_workspace:
+          at: .
+      - run: ls -lR
+      - run: echo Post-process for Y and Z
+
+  post-xyz:
+    docker:
+      - image: debian:buster-slim
+    steps:
+      - attach_workspace:
+          at: .
+      - run: ls -lR
+      - run: echo Add final touches
+
+workflows:
+  the-workflow:
+    jobs:
+      - job-common-1
+      - job-common-2:
+          requires:
+            - job-common-1
+      - build-module:
+          name: job-x
+          module: x
+          filters:
+            paths:
+              - module-x
+          requires:
+            - job-common-2
+      - build-module:
+          name: job-y
+          module: y
+          filters:
+            paths:
+              - module-y
+              - module-z
+          requires:
+            - job-common-2
+      - build-module:
+          name: job-z
+          module: z
+          filters:
+            paths:
+              - module-z
+          requires:
+            - job-common-2
+      - post-yz:
+          requires:
+            - job-y
+            - job-z
+      - post-xyz:
+          requires:
+            - job-x
+            - post-yz

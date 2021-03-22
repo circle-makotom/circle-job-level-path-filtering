@@ -1,0 +1,154 @@
+version: 2.1
+
+setup: true
+
+workflows:
+  setup:
+    jobs:
+      - job-level-path-filtering/do
+
+orbs:
+  # The black box
+  job-level-path-filtering:
+    orbs:
+      continuation: circleci/continuation@0.0.1
+    commands:
+      filter-jobs-in-workflow-by-path:
+        parameters:
+          continue-config:
+            description: The source config to run as the main workflow
+            type: string
+            default: .circleci/continue-config.yml
+          filtered-config:
+            description: The path modified version of continue-config should be put
+            type: string
+            default: .circleci/continue-config-filtered.yml
+          base-revision:
+            description: Revision to compare with the current HEAD
+            type: string
+            default: main
+        steps:
+          - run:
+              name: Install js-yaml
+              command: npm i js-yaml
+          - run:
+              name: Generate the script to run
+              command: |
+                cat \<< EOD > process-continue-config.js
+                const child_process = require('child_process');
+                const fs = require('fs');
+                const yaml = require('js-yaml');
+
+                {
+                    const srcConfigPath = process.argv[2];
+                    const dstConfigPath = process.argv[3];
+                    const baseRev = process.argv[4];
+
+                    const srcConfigStr = fs.readFileSync(srcConfigPath, 'utf-8');
+                    const config = yaml.load(srcConfigStr);
+
+                    Object.getOwnPropertyNames(config.workflows).forEach((propName) => {
+                        const prop = config.workflows[propName];
+
+                        if (Object(prop) === prop && Array.isArray(prop.jobs)) {
+                            const workflow = prop;
+                            const updatedJobs = [];
+                            const filteredJobs = [];
+
+                            workflow.jobs.forEach((elem) => {
+                                let job = elem;
+
+                                if (typeof job === typeof '') {
+                                    updatedJobs.push(job);
+                                    return;
+                                }
+
+                                {
+                                    // The config syntax guarantees that there is only 1 property in the object as an element
+                                    const jobName = Object.getOwnPropertyNames(job)[0];
+                                    let jobProps = job[jobName];
+
+                                    // If the job has `requires`, and it requires filtered-out jobs, filter it out
+                                    if (Array.isArray(jobProps.requires)) {
+                                        if (!jobProps.requires.every((dep) => !filteredJobs.includes(dep))) {
+                                            filteredJobs.push(jobProps.name ? job.name : jobName);
+                                            return;
+                                        }
+                                    }
+
+                                    // If the job property has no filters, run it
+                                    if (!jobProps.filters || !jobProps.filters.paths || !Array.isArray(jobProps.filters.paths)) {
+                                        updatedJobs.push(job);
+                                        return;
+                                    }
+
+                                    {
+                                        const paths = jobProps.filters.paths;
+
+                                        delete jobProps.filters.paths;
+
+                                        if (Object.getOwnPropertyNames(jobProps.filters).length === 0) {
+                                            delete jobProps.filters;
+                                        }
+
+                                        if (Object.getOwnPropertyNames(jobProps).length === 0) {
+                                            job = jobName;
+                                        }
+
+                                        if (!paths.every((path) => {
+                                            return !(
+                                                child_process.spawnSync('git', ['diff', '--name-only', baseRev, path]).stdout.length > 0 ||
+                                                child_process.spawnSync('git', ['rev-parse', '--verify', 'HEAD~1']).status > 0 ||
+                                                child_process.spawnSync('git', ['diff', '--name-only', 'HEAD~1', path]).stdout.length > 0
+                                            );
+                                        })) {
+                                            updatedJobs.push(job);
+                                        } else {
+                                            filteredJobs.push(jobProps.name ? jobProps.name : jobName);
+                                        }
+                                    }
+                                }
+                            });
+
+                            workflow.jobs = updatedJobs;
+                        }
+                    });
+
+                    fs.writeFileSync(dstConfigPath, yaml.dump(config));
+                }
+                EOD
+          - run:
+              name: Filter the config
+              command: node process-continue-config.js "<< parameters.continue-config >>" "<< parameters.filtered-config >>" "<< parameters.base-revision >>"
+
+    jobs:
+      do:
+        parameters:
+          continue-config:
+            description: The source config to run as the main workflow
+            type: string
+            default: .circleci/continue-config.yml
+          filtered-config:
+            description: The path modified version of continue-config should be put
+            type: string
+            default: .circleci/continue-config-filtered.yml
+          base-revision:
+            description: Revision to compare with the current HEAD
+            type: string
+            default: main
+        docker:
+          - image: cimg/node:current
+        steps:
+          - checkout
+          - run:
+              name: DEMO - Show the original continue config
+              command: cat << parameters.continue-config >>
+          - filter-jobs-in-workflow-by-path:
+              continue-config: << parameters.continue-config >>
+              filtered-config: << parameters.filtered-config >>
+              base-revision: << parameters.base-revision >>
+          - run:
+              name: DEMO - Show the filtered config
+              command: cat << parameters.filtered-config >>
+          - continuation/continue:
+              configuration_path: << parameters.filtered-config >>
